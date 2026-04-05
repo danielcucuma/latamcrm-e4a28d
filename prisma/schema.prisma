@@ -1,0 +1,269 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Tenants (Multi-tenant SaaS) ──────────────────────────────
+model Tenant {
+  id                String   @id @default(cuid())
+  name              String
+  slug              String   @unique
+  country           String   // "AR", "MX", "CL", "CO", "BR", "PE"
+  currency          String   @default("USD") // Primary currency for tenant
+  stripeCustomerId  String?  @map("stripe_customer_id")
+  plan              String   @default("starter") // "starter" | "professional"
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  users             TenantUser[]
+  accounts          Account[]
+  deals             Deal[]
+  subscriptions     Subscription[]
+  automations       Automation[]
+  emailTemplates    EmailTemplate[]
+  webhookLogs       WebhookLog[]
+
+  @@map("tenants")
+}
+
+// ── Users ────────────────────────────────────────────────────
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  avatarUrl     String?  @map("avatar_url")
+  emailVerified Boolean  @default(false) @map("email_verified")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tenants       TenantUser[]
+  sessions      Session[]
+  activities    Activity[]
+
+  @@map("users")
+}
+
+// ── Many-to-Many User ↔ Tenant with Role ────────────────────
+model TenantUser {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  role      String   @default("member") // "owner" | "admin" | "member"
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("tenant_users")
+}
+
+// ── Sessions ─────────────────────────────────────────────────
+model Session {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ── Accounts (Clientes SaaS) ─────────────────────────────────
+model Account {
+  id                  String   @id @default(cuid())
+  tenantId            String   @map("tenant_id")
+  companyName         String   @map("company_name")
+  country             String   // "AR", "MX", "CL", "CO", "BR", "PE"
+  currency            String   // Local currency: ARS, MXN, CLP, COP, BRL, PEN
+  industry            String?
+  monthlyRevenueUsd   Float?   @map("monthly_revenue_usd")
+  contactEmail        String?  @map("contact_email")
+  contactPhone        String?  @map("contact_phone")
+  website             String?
+  notes               String?  @db.Text
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deals               Deal[]
+  subscriptions       Subscription[]
+  contacts            Contact[]
+  activities          Activity[]
+
+  @@index([tenantId])
+  @@index([country])
+  @@map("accounts")
+}
+
+// ── Contacts (Personas en cuentas) ───────────────────────────
+model Contact {
+  id          String   @id @default(cuid())
+  accountId   String   @map("account_id")
+  name        String
+  email       String
+  phone       String?
+  role        String?  // "decision_maker", "influencer", "end_user"
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+  @@map("contacts")
+}
+
+// ── Deals (Oportunidades de venta) ───────────────────────────
+model Deal {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  accountId       String   @map("account_id")
+  title           String
+  stage           String   @default("prospecting") // "prospecting" | "qualified" | "proposal" | "negotiation" | "won" | "lost"
+  amountLocal     Float    @map("amount_local")
+  currency        String   // Local currency
+  amountUsd       Float?   @map("amount_usd") // Cached conversion
+  closeDate       DateTime @map("close_date")
+  probability     Int      @default(0) // 0-100%
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  activities      Activity[]
+
+  @@index([tenantId])
+  @@index([accountId])
+  @@index([stage])
+  @@map("deals")
+}
+
+// ── Subscriptions (Suscripciones recurrentes) ────────────────
+model Subscription {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  accountId       String   @map("account_id")
+  mrrLocal        Float    @map("mrr_local") // Monthly Recurring Revenue
+  currency        String   // Local currency
+  mrrUsd          Float?   @map("mrr_usd") // Cached conversion
+  renewalDate     DateTime @map("renewal_date")
+  churnRisk       Boolean  @default(false) @map("churn_risk") // Flag for alerts
+  status          String   @default("active") // "active" | "paused" | "churned"
+  churnedAt       DateTime? @map("churned_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([accountId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+// ── Automations (Flujos de automatización) ───────────────────
+model Automation {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  name            String
+  trigger         String   // "deal_stage_change" | "renewal_30_days" | "churn_risk" | "new_account"
+  action          String   // "send_email" | "create_task" | "update_field"
+  emailTemplateId String?  @map("email_template_id")
+  enabled         Boolean  @default(true)
+  conditions      String?  @db.Text // JSON stringified conditions
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  emailTemplate   EmailTemplate? @relation(fields: [emailTemplateId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@map("automations")
+}
+
+// ── Email Templates ──────────────────────────────────────────
+model EmailTemplate {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  subject     String
+  body        String   @db.Text
+  variables   String?  @db.Text // JSON: ["{{company_name}}", "{{contact_name}}"]
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  automations Automation[]
+
+  @@index([tenantId])
+  @@map("email_templates")
+}
+
+// ── Activities (Auditoría y timeline) ────────────────────────
+model Activity {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  userId      String   @map("user_id")
+  accountId   String?  @map("account_id")
+  dealId      String?  @map("deal_id")
+  type        String   // "email_sent" | "call_logged" | "deal_moved" | "note_added" | "subscription_renewed"
+  description String   @db.Text
+  metadata    String?  @db.Text // JSON for extra data
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account     Account? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  deal        Deal?    @relation(fields: [dealId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([accountId])
+  @@index([dealId])
+  @@map("activities")
+}
+
+// ── Webhook Logs (Stripe, payment gateways) ──────────────────
+model WebhookLog {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  provider    String   // "stripe" | "mercadopago" | "paypal"
+  eventType   String   @map("event_type")
+  payload     String   @db.Text // Raw JSON
+  processed   Boolean  @default(false)
+  error       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([processed])
+  @@map("webhook_logs")
+}
+
+// ── Subscriptions (Stripe) ───────────────────────────────────
+model StripeSubscription {
+  id                   String    @id @default(cuid())
+  tenantId             String    @map("tenant_id")
+  stripeSubscriptionId String    @unique @map("stripe_subscription_id")
+  stripePriceId        String    @map("stripe_price_id")
+  status               String    // "active" | "trialing" | "canceled" | "past_due"
+  currentPeriodEnd     DateTime  @map("current_period_end")
+  cancelAtPeriodEnd    Boolean   @default(false) @map("cancel_at_period_end")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("stripe_subscriptions")
+}
